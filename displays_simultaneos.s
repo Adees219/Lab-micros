@@ -7,10 +7,11 @@
 ; Hardware: leds (RA), botones (RB), displays (RC)
 ; 
 ; Creado: 16 feb, 2023
-; Última modificación: 13 feb, 2023
+; Ãšltima modificaciÃ³n: 13 feb, 2023
 
 PROCESSOR 16F887
 #include <xc.inc>
+
     
 ; CONFIG1
   CONFIG  FOSC = INTRC_NOCLKOUT   ; Oscillator Selection bits (INTOSC oscillator: CLKOUT function on RA6/OSC2/CLKOUT pin, I/O function on RA7/OSC1/CLKIN)
@@ -28,11 +29,29 @@ PROCESSOR 16F887
   CONFIG  BOR4V = BOR40V        ; Brown-out Reset Selection bit (Brown-out Reset set to 4.0V)
   CONFIG  WRT = OFF             ; Flash Program Memory Self Write Enable bits (Write protection off)
 
-PSECT udata_bank0 ;bytes a guardar
- cont_small: DS 1
- 
+    
+;----------------------Macros---------------------
+reinicio_tmr0 macro
+    banksel PORTA
+    movlw 246
+    movf TMR0
+    bcf T0IF
+endm
   
+;------------------Variables----------------------  
+PSECT udata_bank0 ;bytes a guardar
+  var: DS 1
+  flags: DS 1
+  nibble: DS 2
+  display_var: DS 2
+   
+    
+PSECT udata_shr ;variables que se protegen los bits de status 
+W_TEMP: DS 1
+STATUS_TEMP: DS 1
+    
 PSECT resVect, class=CODE, abs, delta=2
+    
 ;---------------------Vector reset-------------------
 ORG 00h
 resetVec:
@@ -41,67 +60,134 @@ resetVec:
 
     
 PSECT code, delta=2, abs
-ORG 100h
-
+    
+;--------------------interrupciones------------
  
+ ORG 04h
+push:
+    movwf W_TEMP ; copia W al registro temporal
+    swapf STATUS, W ; intercambio de nibbles y guarda en W
+    movwf STATUS_TEMP; guarda status en el registro temporal
  
- 
-;---------------------Configuración-------------
- setup:
-    call config_io	;configuracion de entradas/salidas
-    call config_reloj	;configuracion del reloj
-  //  call config_tmr0	;configuracion tmr0
+isr: ; rutina de interrupcion
+   
+   ;contador push_buttons
+   btfsc RBIF   ; al momento de detectar un cambio en el puerto B, se activa la bandera
+   call cont_iocb
+   
+   btfsc T0IF
+   call	 int_tm0
   
-  banksel PORTA
+pop: 
+    swapf STATUS_TEMP, W ;intercambio nibbles y guarda en W
+    movwf STATUS	 ;mueve W a STATUS
+    swapf W_TEMP, F	;intercambio nibbles y guarda en W temporal
+    swapf W_TEMP, W	;intervambio nibbles y guarda en W
+   
+    retfie ;salida de la interrupcion
+    
+ 
+;----------------------subrutina interrupcion------------------    
+cont_iocb:
+    banksel PORTA
+    btfss PORTB, 0
+    incf PORTA
+    btfss PORTB, 1
+    decf PORTA
+    bcf RBIF
+    return  
+    
+    
+int_tm0:   
+    reinicio_tmr0
+    clrf PORTD
+    btfsc flags, 0
+    goto display_1
+   ;sino va al display_0
+   
+   
+display_0:
+    movf display_var, W
+    movwf PORTC
+    bsf PORTD, 0
+    goto toggle_display
+    
+display_1:
+    movf display_var+1, W
+    movwf PORTC
+    bsf PORTD, 1 
+
+toggle_display:
+   movlw 1
+   xorwf flags, F
+   return
+   
+    
+    
+ORG 100h
+ 
+;---------------------ConfiguraciÃ³n--------------------------
+setup:
+    call config_io	    ;input/output
+    call config_reloj	    ;oscilador/reloj
+    call config_int_enable  ; interrupciones
+    call config_iocrb	    ; interrupt-on-change
+    call config_tmr0	;timer0
+    
+    
+    banksel PORTA
+
  
  ;----------------------LOOP------------------------
 loop:
-    btfss PORTB, 0 ;chequea si se presiona el boton
-    call incrs_A 
-    
-    btfss PORTB, 1
-    call dicrs_A
-    
+    movf PORTA, W
+    movwf var
+    call separar_nibbles
+    call preparar_displays
     goto loop 
-    
- 
-  ;---------------subrutinas loop-------------------- 
-incrs_A:
-    call delay_small 
-    btfss PORTB, 0  ;condicion antirebote
-    goto $-1	    ;regresa a linea anterior
-    incf PORTA
+;--------------------subrutina loop----------------    
+separar_nibbles:
+    movf var, W
+    andlw 0x0F
+    movwf nibble
+    swapf var, W
+    andlw 0X0F
+    movwf nibble+1
     return
-
     
-dicrs_A:
-    call delay_small 
-    btfss PORTB, 1  ;condicion antirebote
-    goto $-1	    ;regresa a linea anterior
-    decf PORTA
+    
+preparar_displays: 
+    movf nibble, W
+    call tabla
+    movwf display_var
+    
+    movf nibble+1, W
+    call tabla
+    movwf display_var+1
     return
-
-    
-delay_small:
-    movlw   150 
-    movwf   cont_small 
-    decfsz  cont_small, 1 
-    goto    $-1 
-    return 
-   
-   
-    
     
  ;-----------------subrutinas setup---------------
- config_io:
+config_iocrb:
+    banksel TRISA
+    bsf IOCB0   ;interrupt-on-change 1:enabled
+    bsf IOCB1
+    
+    banksel PORTA
+    movf PORTB, W ;cuando lee, termina la condicion de mismatch
+    bcf RBIF
+    return
+ 
+config_io:
     banksel ANSEL 
     clrf ANSEL 
     clrf ANSELH ;entradas digitales
     
     ;salidas
     banksel TRISA
-    movlw 0b00000000
-    movwf TRISA
+    clrf TRISA
+    clrf TRISC
+    bcf TRISD, 0
+    bcf TRISD, 1
     
     ;entradas
     bsf TRISB, 0
@@ -116,7 +202,8 @@ delay_small:
     banksel PORTA 
     clrf PORTA
     clrf PORTB 
-   
+    clrf PORTC
+    clrf PORTD
     return
     
     
@@ -128,7 +215,15 @@ config_reloj:
     bsf SCS
     return
 
-  /*  
+config_int_enable:
+    bsf GIE ;global interrupt enable
+    bsf T0IE ; tmr0 interrupt enable
+    bcf T0IF ; bandera interrupcion
+    bsf RBIE  ; RB interrupt enable
+    bcf RBIF ;bandera interrupcion
+    return
+    
+   
 config_tmr0:
     banksel OPTION_REG
     bcf T0CS	;mode: temporizador
@@ -140,22 +235,11 @@ config_tmr0:
    
     banksel PORTA
     reinicio_tmr0
-    return*/
-  
-  
-  
+    return
  
- ;----------------------Macros---------------------
-reinicio_tmr0 macro
-    movlw 214
-    movf TMR0
-    bcf T0IF
-endm
-
-    
   
 ;----------------------Tabla---------------------
- /*tabla: 
+ tabla: 
     CLRF PCLATH
     BSF PCLATH, 0
     ANDLW 0X0F
@@ -179,10 +263,4 @@ endm
     retlw 01110001B ;F
 END
  
- 
-*/ 
- 
-
-    
-
-END
+  
